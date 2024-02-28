@@ -1,0 +1,459 @@
+---
+title: "sCell Analysis"
+format: html
+editor: visual
+---
+
+# Load libraries
+
+```{r}
+library(Seurat)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(BiocSingular)
+library(scDblFinder)
+library(SingleCellExperiment)
+library(SingleR)
+library(scater)
+```
+
+# Load data
+
+```{r}
+covid <- readRDS("../data/covid_sub10.rds")
+```
+
+```{r}
+covid <- UpdateSeuratObject(covid)
+```
+
+```{r}
+covid_sub10 <- covid
+```
+
+# RUN
+
+```{r}
+#Idents(object = covid) <- "severity"
+#covid_sub10 <- subset(covid, downsample = 10000)
+covid_sub10 <- subset(covid_sub10, subset = nCount_RNA > 500)
+covid_sub10[["percent.mt"]] <- PercentageFeatureSet(covid_sub10, pattern = "^MT-")
+covid_sub10 <- PercentageFeatureSet(covid_sub10, "^RP[SL]", col.name = "percent_ribo")
+```
+
+```{r}
+par(mar = c(4, 8, 2, 1))
+C <- covid_sub10@assays$RNA@counts
+C <- Matrix::t(Matrix::t(C)/Matrix::colSums(C)) * 100
+most_expressed <- order(apply(C, 1, median), decreasing = T)[20:1]
+
+selected_genes <- t(as.matrix(C[most_expressed, ]))
+
+```
+
+```{r}
+covid_sub10 <- covid_sub10[ ! grepl('^RP[SL]', rownames(covid_sub10)), ]
+```
+
+```{r}
+covid_sub10 <- NormalizeData(covid_sub10, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+covid_sub10 <- FindVariableFeatures(covid_sub10, selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+#5.6 gb??
+all.genes <- rownames(covid_sub10)
+covid_sub10 <- ScaleData(covid_sub10, features = all.genes)
+```
+
+# 1. Explore data and subset
+
+```{r}
+covid
+```
+
+```{r}
+covid[[]]
+```
+
+```{r}
+Cells(covid)
+```
+
+```{r}
+unique(covid$severity)
+```
+
+```{r}
+covid_sub <- subset(covid, subset = severity == "control" | severity == "critical")
+covid_sub$severity <- factor(covid_sub$severity)
+```
+
+```{r}
+Cells(covid_sub)
+```
+
+```{r}
+length(unique(covid_sub@active.ident))
+```
+
+```{r}
+Idents(object = covid) <- "severity"
+```
+
+```{r}
+covid@active.ident
+```
+
+```{r}
+covid_sub10 <- subset(covid, downsample = 10000)
+```
+
+```{r}
+length(covid_sub10$severity == "critical")
+```
+
+```{r}
+sum(covid_sub10$severity == "moderate")
+```
+
+## UMIs per cell vs. Severity
+
+```{r}
+covid_sub10[[]] |> 
+ggplot(aes(color= severity , x= nCount_RNA, fill=severity)) +
+geom_density(alpha = 0.2) +
+scale_x_log10() +
+theme_classic() +
+ylab("Cell density") +
+geom_vline(xintercept = 500)
+```
+
+The UMI counts per cell should generally be above 500
+
+```{r}
+covid_sub10 <- subset(covid_sub10, subset = nCount_RNA > 500)
+```
+
+# 2. Quality Control
+
+1.  The number of unique genes detected in each cell.
+
+-   low-quality cells or empty droplets will often have very few genes
+
+-   cell doublets or multiplets may exhibit an aberrantly high gene count
+
+2.  The percentage of reads that map to the mitochondrial genome
+
+-   low-quality / dying cells often exhibit extensive mitochondrial contamination
+
+```{r}
+
+covid_sub10[["percent.mt"]] <- PercentageFeatureSet(covid_sub10, pattern = "^MT-")
+
+
+covid_sub10 <- PercentageFeatureSet(covid_sub10, "^RP[SL]", col.name = "percent_ribo")
+```
+
+```{r}
+covid_sub10[[]]
+```
+
+## Quality metrics
+
+Reset cell annotation
+
+```{r}
+Idents(covid_sub) <- "SeuratProject"
+```
+
+Visualize quality metrics
+
+```{r}
+
+VlnPlot(covid_sub10, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent_ribo"), ncol = 4)
+```
+
+### Filter for quality metrics??
+
+```{r}
+#covid_sub <- subset(covid_sub, 
+#                    subset = nFeature_RNA > ???? &
+#                      nFeature_RNA < ???? &
+#                      percent.mt < ???)
+```
+
+## Genes constitute most of the UMIs in a single cell
+
+```{r}
+par(mar = c(4, 8, 2, 1))
+C <- covid_sub10@assays$RNA@counts
+C <- Matrix::t(Matrix::t(C)/Matrix::colSums(C)) * 100
+most_expressed <- order(apply(C, 1, median), decreasing = T)[20:1]
+
+selected_genes <- t(as.matrix(C[most_expressed, ]))
+
+```
+
+```{r}
+boxplot(as.matrix(t(C[most_expressed, ])), cex = 0.1, las = 2, main = "% total count per cell",
+  col = (scales::hue_pal())(20)[20:1], horizontal = F)
+```
+
+```{r}
+colnames(t(C[most_expressed, ]))
+```
+
+### Filter for genes
+
+```{r}
+covid_sub10 <- covid_sub10[ ! grepl('^RP[SL]', rownames(covid_sub10)), ]
+```
+
+# 3. Normalization
+
+```{r}
+covid_sub10 <- NormalizeData(covid_sub10, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+# 4. Identify Highly Variable Features
+
+```{r}
+covid_sub10 <- FindVariableFeatures(covid_sub10, selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+
+top10 <- head(VariableFeatures(covid_sub10), 10)
+
+plot1 <- VariableFeaturePlot(covid_sub10)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE, box.padding = 1, max.overlaps = Inf)
+plot2
+```
+
+```{r}
+covid_sub10@assays$RNA$scale.data |> glimpse()
+```
+
+# 5. Scale data
+
+```{r}
+all.genes <- rownames(covid_sub10)
+covid_sub10 <- ScaleData(covid_sub10, features = all.genes)
+```
+
+# 6. Visualization
+
+```{r}
+covid_sub10 <- RunPCA(covid_sub10, features = VariableFeatures(object = covid_sub10))
+```
+
+```{r}
+Cells(covid_sub10)
+```
+
+```{r}
+unique(covid_sub10$severity)
+```
+
+```{r}
+covid_sub10 <- FindNeighbors(covid_sub10, dims = 1:15)
+covid_sub10 <- FindClusters(covid_sub10, resolution = c(0.3, 0.5, 0.7))
+```
+
+```{r}
+covid_sub10 <- RunUMAP(covid_sub10, dims = 1:15)
+p1<- DimPlot(covid_sub10, reduction = "umap")
+
+DimPlot(covid_sub10, group.by = "RNA_snn_res.0.7", label = TRUE)
+DimPlot(covid_sub10, group.by = "RNA_snn_res.0.5", label = TRUE)
+DimPlot(covid_sub10, group.by = "RNA_snn_res.0.3", label = TRUE)
+```
+
+```{r}
+Idents(covid_sub) <- "RNA_snn_res.0.5"
+```
+
+# 7. Doublets
+
+```{r}
+
+sce <- as.SingleCellExperiment(covid_sub10)
+
+top.var <- VariableFeatures(covid_sub10)
+```
+
+```{r}
+dbl.dens <- computeDoubletDensity(sce, subset.row=top.var, 
+                                  d=ncol(reducedDim(sce)))
+summary(dbl.dens)
+```
+
+```{r}
+sce$DoubletScore <- dbl.dens
+plotUMAP(sce, colour_by="DoubletScore")
+```
+
+```{r}
+dbl.calls <- doubletThresholding(data.frame(score=dbl.dens),
+                                 method="griffiths", returnType="call")
+summary(dbl.calls)
+```
+
+# SAVE OBJECT
+
+```{r}
+saveRDS(covid_sub10, "covid_pre.rds")
+```
+
+# 8. Integration
+
+```{r}
+# umap - before integration
+DimPlot(covid_sub10, reduction = 'umap', split.by = 'severity')
+```
+
+```{r}
+# split data set based on severity
+covid_sub10_split<- SplitObject(covid_sub10, split.by = "severity")
+```
+
+```{r}
+covid_sub10_split <- lapply(X = covid_sub10_split, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+features <- SelectIntegrationFeatures(object.list = covid_sub10_split)
+
+```
+
+```{r}
+# RUN THIS ON R SERVER (TAKES TIME)
+#library(future)
+#plan("multisession", workers = 4)
+#options(future.globals.maxSize = 8000 * 1024^2)
+
+#find integration anchors
+severity.anchors <- FindIntegrationAnchors(object.list = covid_sub10_split, anchor.features = features)
+
+severity.combined <- IntegrateData(anchorset = severity.anchors)
+
+DefaultAssay(severity.combined) <- "integrated"
+```
+
+```{r}
+severity.combined <- readRDS("../data/severity.combined.rds")
+```
+
+```{r}
+#check integration looks good
+
+severity.combined <- ScaleData(severity.combined, verbose = FALSE)
+severity.combined <- RunPCA(severity.combined, npcs = 30, verbose = FALSE)
+ElbowPlot(severity.combined) #15 PCs
+severity.combined <- RunUMAP(severity.combined, reduction = "pca", dims = 1:15)
+severity.combined <- FindNeighbors(severity.combined, reduction = "pca", dims = 1:15)
+severity.combined <- FindClusters(severity.combined, resolution = 0.1)
+severity.combined <- FindClusters(severity.combined, resolution = 0.3)
+severity.combined <- FindClusters(severity.combined, resolution = 0.5)
+severity.combined <- FindClusters(severity.combined, resolution = 0.7)
+```
+
+```{r}
+severity.combined <- FindClusters(severity.combined, resolution = 0.6)
+```
+
+```{r}
+#visualise - which is the good resolution?
+Idents(severity.combined) <- "integrated_snn_res.0.5" # modify number here
+DimPlot(severity.combined, reduction = "umap", split.by = "severity")
+
+```
+
+```{r}
+library(clustree)
+# integrated_snn_res.0.1 to 0.7 correspond to the different clustering resolutions
+
+clustree(severity.combined, prefix = "integrated_snn_res.")
+```
+
+```{r}
+unique(severity.combined$celltype)
+```
+
+```{r}
+metrics <-  c("nCount_RNA", "nFeature_RNA", "percent.mt")
+
+FeaturePlot(severity.combined, 
+            reduction = "umap", 
+            features = metrics,
+            pt.size = 0.4, 
+            order = TRUE,
+            min.cutoff = 'q10',
+            label = TRUE)
+```
+
+```{r}
+saveRDS(severity.combined, "severity.combined.rds")
+```
+
+# 9. Cell type annotation
+
+The HPCA database resulted in a bad cell type annotation. In this case we should have used a specific airway epithelium database (Over 10gb - Takes too long to run)
+
+```{r}
+Idents(severity.combined) <- "integrated_snn_res.0.5"
+```
+
+```{r}
+library(SingleR)
+```
+
+```{r}
+library(celldex)
+```
+
+```{r}
+
+hpca <- HumanPrimaryCellAtlasData()
+
+ref <- as.SingleCellExperiment(hpca, assay = "RNA")
+
+counts <- GetAssayData(severity.combined, assay = "RNA", layer = 'counts')
+
+pred <- SingleR(test = counts,
+                ref = hpca,
+                labels = hpca$label.main,
+                de.method="wilcox")
+
+severity.combined$celltype_2 <- pred$labels[match(rownames(severity.combined@meta.data), rownames(pred))]
+
+DimPlot(severity.combined, reduction = 'umap', group.by = 'celltype')
+```
+
+```{r}
+severity.combined[[]]
+```
+
+```{r}
+saveRDS(severity.combined, "severity.anno.rds")
+
+
+severity.combined <- readRDS("se")
+```
+
+```{r}
+severity.combined <- severity.combined@meta.data
+
+# Create a vector specifying cell type categories
+cell_categories <- ifelse(severity.combined@meta.data$celltype %in% c("Basal", "Ciliated-diff", "Ciliated", "FOXN4", "Ionocyte", "IRC", "Secretory-diff", "Secretory", "Squamous", "unknown_epithelial"), "epithelial cells", "immune cells")
+
+# Add the new metadata column to the Seurat object
+severity.combined <- AddMetaData(object = severity.combined, metadata = cell_categories, col.name = "cell_category")
+
+```
